@@ -4,7 +4,7 @@ numpy
 joblib
 altair
 requests
-pip install scikit-learn==1.6.1
+scikit-learn==1.6.1
 requests-cache
 retry-requests
 openmeteo-requests
