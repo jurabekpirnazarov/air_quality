@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import altair as alt
 
 # Mavjud yordamchi funksiyalar
@@ -19,10 +19,10 @@ st.set_page_config(
 # Auto-refresh (every 30 minutes)
 # ------------------------
 if "last_refresh" not in st.session_state:
-    st.session_state["last_refresh"] = datetime.utcnow()
+    st.session_state["last_refresh"] = datetime.now(timezone.utc)
 
-now = datetime.utcnow()
-if (now - st.session_state["last_refresh"]).total_seconds() > 1800:  # 1800s = 30min
+now = datetime.now(timezone.utc)
+if (now - st.session_state["last_refresh"]) > timedelta(minutes=30):
     st.session_state["last_refresh"] = now
     st.rerun()
 
@@ -51,48 +51,45 @@ def compute_disaster_warnings(df):
     warnings = []
     dfp = df.set_index('date').sort_index()
 
-    # Pressure drop
     if 'surface_pressure' in df.columns and len(dfp) >= 4:
         dfp['p_3h_diff'] = dfp['surface_pressure'] - dfp['surface_pressure'].shift(3)
         recent = dfp['p_3h_diff'].iloc[-1]
         if recent <= -6:
             warnings.append("⚠️ Pressure dropped ≥6 hPa in last 3h → possible storm front 🌪")
 
-    # Strong winds
     if 'windspeed' in df.columns:
         max_w = df['windspeed'].max()
         if max_w >= 15:
             warnings.append("💨 Strong wind forecast (≥15 m/s) → storm risk")
 
-    # Heavy rain
     if 'precipitation' in df.columns and len(dfp) >= 24:
         tot24 = dfp['precipitation'].rolling(24, min_periods=1).sum().iloc[-1]
         if tot24 >= 20:
             warnings.append("🌧 Heavy rainfall (≥20 mm/24h) → flooding risk")
 
-    # Sudden temperature drop
     if 'temperature_2m' in df.columns and len(dfp) >= 6:
         temp_diff = dfp['temperature_2m'].iloc[-1] - dfp['temperature_2m'].iloc[-6]
         if temp_diff <= -5:
             warnings.append(f"🌡 Sudden temp drop ({temp_diff:.1f}°C in 6h) → storm front signal")
 
-    # Heatwave
-    if 'temperature_2m' in df.columns and df['temperature_2m'].max() > 40:
-        warnings.append("🔥 Extreme heat (>40°C) → heatwave risk")
+    if 'temperature_2m' in df.columns:
+        if df['temperature_2m'].max() > 40:
+            warnings.append("🔥 Extreme heat (>40°C) → heatwave risk")
 
-    # Humidity + heat stress
     if 'humidity' in df.columns and 'temperature_2m' in df.columns:
-        if df['humidity'].iloc[-1] > 85 and df['temperature_2m'].iloc[-1] > 30:
+        last_hum = df['humidity'].iloc[-1]
+        last_temp = df['temperature_2m'].iloc[-1]
+        if last_hum > 85 and last_temp > 30:
             warnings.append("🥵 High humidity + heat → heat stress risk")
 
-    # Icing / snowfall
     if 'temperature_2m' in df.columns and 'precipitation' in df.columns:
         if df['temperature_2m'].min() < 0 and df['precipitation'].sum() > 0:
             warnings.append("❄️ Subzero + precipitation → icing/snowfall risk")
 
-    # Fog risk
     if 'cloudcover' in df.columns and 'humidity' in df.columns:
-        if df['cloudcover'].iloc[-1] > 90 and df['humidity'].iloc[-1] > 80:
+        last_cc = df['cloudcover'].iloc[-1]
+        last_h = df['humidity'].iloc[-1]
+        if last_cc > 90 and last_h > 80:
             warnings.append("🌫 High humidity + cloudcover → fog risk")
 
     return warnings
@@ -106,7 +103,7 @@ FEATURES = [
 ]
 
 # ------------------------
-# Sidebar (read-only)
+# Sidebar (fixed info only)
 # ------------------------
 st.sidebar.title("Controls (fixed)")
 st.sidebar.text("Data source: OpenAQ + OpenMeteo")
@@ -130,7 +127,7 @@ st.header("1) Data")
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.subheader("Realtime Air Quality")
+    st.subheader("Realtime Air Quality (current values)")
     try:
         aq_df = air_quality()
         if not aq_df.empty:
@@ -152,13 +149,14 @@ with col_a:
         else:
             st.warning("No realtime data available.")
     except Exception as e:
-        st.error(f"Realtime error: {e}")
+        st.error(f"Realtime air quality error: {e}")
 
 with col_b:
     st.subheader("Forecast (weather)")
     try:
-        _, forecast_df = get_weather(date_from=datetime.utcnow().date(),
-                                     date_till=(datetime.utcnow().date() + timedelta(days=3)),
+        today = datetime.now(timezone.utc).date()
+        _, forecast_df = get_weather(date_from=today,
+                                     date_till=(today + timedelta(days=3)),
                                      chunk_days=7)
         st.success("✅ Forecast fetched")
         st.dataframe(forecast_df.head(10))
@@ -171,7 +169,9 @@ with col_b:
 # ------------------------
 st.header("2) Prediction & Graphs")
 
-if model is not None and not forecast_df.empty:
+if model is None or forecast_df.empty:
+    st.info("Model or forecast data missing — cannot run prediction.")
+else:
     forecast_df_prepared, forecast_feat, X_forecast = prepare_forecast_for_model(forecast_df, FEATURES)
     try:
         preds = model.predict(X_forecast)
@@ -190,7 +190,7 @@ if model is not None and not forecast_df.empty:
 
     st.subheader("Weather Features")
     weather_cols = ["temperature_2m","humidity","windspeed","surface_pressure","precipitation","cloudcover"]
-    df_melted = forecast_df_prepared.melt(id_vars=["date"], value_vars=weather_cols, 
+    df_melted = forecast_df_prepared.melt(id_vars=["date"], value_vars=weather_cols,
                                           var_name="feature", value_name="value")
     weather_chart = alt.Chart(df_melted).mark_line().encode(
         x="date:T", y="value:Q", color="feature:N",
