@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,18 +5,23 @@ import joblib
 from datetime import datetime, timedelta, timezone
 import altair as alt
 
-# Mavjud yordamchi funksiyalar
+# -----------------------------
+# Helper funksiyalar
+# -----------------------------
 from functions import air_quality, get_weather, add_time_features
 
+# -----------------------------
+# Streamlit config
+# -----------------------------
 st.set_page_config(
     page_title="Uzbekistan Air Quality & Storm Prediction",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
+st.markdown("This app shows **air quality (PM2.5)** and **weather forecast** with simple storm warnings.")
 
-# ------------------------
-# Auto-refresh (every 30 minutes)
-# ------------------------
+# -----------------------------
+# Auto-refresh (30 min)
+# -----------------------------
 if "last_refresh" not in st.session_state:
     st.session_state["last_refresh"] = datetime.now(timezone.utc)
 
@@ -26,9 +30,9 @@ if (now - st.session_state["last_refresh"]) > timedelta(minutes=30):
     st.session_state["last_refresh"] = now
     st.rerun()
 
-# ------------------------
-# Helper utilities
-# ------------------------
+# -----------------------------
+# Model loader
+# -----------------------------
 @st.cache_data(ttl=600)
 def load_model(path="best_model.pkl"):
     try:
@@ -37,6 +41,9 @@ def load_model(path="best_model.pkl"):
     except Exception as e:
         return None, str(e)
 
+# -----------------------------
+# Forecast prep
+# -----------------------------
 def prepare_forecast_for_model(forecast_df, features):
     forecast_df = forecast_df.copy()
     forecast_df['date'] = pd.to_datetime(forecast_df['date'], utc=True, errors='coerce')
@@ -47,6 +54,9 @@ def prepare_forecast_for_model(forecast_df, features):
     X_forecast = forecast_feat[[c for c in features if c in forecast_feat.columns]]
     return forecast_df, forecast_feat, X_forecast
 
+# -----------------------------
+# Disaster warning rules
+# -----------------------------
 def compute_disaster_warnings(df):
     warnings = []
     dfp = df.set_index('date').sort_index()
@@ -94,7 +104,9 @@ def compute_disaster_warnings(df):
 
     return warnings
 
-# Features list
+# -----------------------------
+# Features
+# -----------------------------
 FEATURES = [
     'temperature_2m','apparent_temperature','precipitation','rain','snowfall',
     'humidity','surface_pressure','year','month','day','hour','dayofweek',
@@ -102,57 +114,50 @@ FEATURES = [
     'value_lag1','value_lag24','value_roll6','value_roll24'
 ]
 
-# ------------------------
-# Sidebar (fixed info only)
-# ------------------------
-st.sidebar.title("Controls (fixed)")
-st.sidebar.text("Data source: OpenAQ + OpenMeteo")
-st.sidebar.text("Forecast update: every 30 minutes")
-st.sidebar.text("Forecast days: 3 (default)")
+# -----------------------------
+# Sidebar
+# -----------------------------
+st.sidebar.title("⚙️ Controls")
+st.sidebar.text("Data: OpenAQ + OpenMeteo")
+st.sidebar.text("Refresh: every 30 minutes")
+st.sidebar.text("Forecast: 3 days")
 st.sidebar.text("Model: best_model.pkl")
-st.sidebar.text("Predictions saved to CSV")
 
-# ------------------------
+# -----------------------------
 # Title
-# ------------------------
+# -----------------------------
 st.title("🇺🇿 Uzbekistan — Air Quality & Weather Forecast")
-st.markdown("Machine learning system: **PM2.5 prediction** + weather dashboard + storm warnings.")
 
-model, err = load_model("best_model.pkl")
-
-# ------------------------
+# -----------------------------
 # Data
-# ------------------------
+# -----------------------------
 st.header("1) Data")
+
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.subheader("Realtime Air Quality (current values)")
+    st.subheader("Realtime Air Quality")
     try:
         aq_df = air_quality()
         if not aq_df.empty:
             row = aq_df.iloc[0]
-            st.write("📍 Location: Tashkent (Chilanzar)")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("CO (mg/m³)", row["co"])
-                st.metric("SO₂ (µg/m³)", row["so2"])
-                st.metric("Humidity (%)", row["h"])
-            with c2:
-                st.metric("O₃ (µg/m³)", row["o3"])
-                st.metric("Pressure (hPa)", row["p"])
+            col1, col2, col3 = st.columns(3)
+            with col1:
                 st.metric("Temperature (°C)", row["t"])
-            with c3:
+                st.metric("Humidity (%)", row["h"])
+            with col2:
+                st.metric("Pressure (hPa)", row["p"])
+                st.metric("CO (mg/m³)", row["co"])
+            with col3:
                 st.metric("Wind Speed (m/s)", row["w"])
-                st.metric("Wind Gust (m/s)", row["wg"])
-                st.metric("Dew Point (°C)", row["dew"])
+                st.metric("SO₂ (µg/m³)", row["so2"])
         else:
             st.warning("No realtime data available.")
     except Exception as e:
         st.error(f"Realtime air quality error: {e}")
 
 with col_b:
-    st.subheader("Forecast (weather)")
+    st.subheader("Weather Forecast (3 days)")
     try:
         today = datetime.now(timezone.utc).date()
         _, forecast_df = get_weather(date_from=today,
@@ -164,10 +169,12 @@ with col_b:
         st.error(f"Forecast fetch failed: {e}")
         forecast_df = pd.DataFrame()
 
-# ------------------------
+# -----------------------------
 # Prediction
-# ------------------------
+# -----------------------------
 st.header("2) Prediction & Graphs")
+
+model, err = load_model("best_model.pkl")
 
 if model is None or forecast_df.empty:
     st.info("Model or forecast data missing — cannot run prediction.")
@@ -181,42 +188,76 @@ else:
         st.error(f"Prediction failed: {e}")
         st.stop()
 
+    # PM2.5 forecast
     st.subheader("PM2.5 Forecast (next hours)")
-    pm_chart = alt.Chart(forecast_df_prepared).mark_line(color="red").encode(
-        x="date:T", y=alt.Y("prediction:Q", title="PM2.5 (µg/m³)"),
-        tooltip=["date:T","prediction:Q"]
-    ).properties(width=800, height=300)
-    st.altair_chart(pm_chart, use_container_width=True)
+    df_pm = forecast_df_prepared.dropna(subset=["prediction"])  # NaN larni olib tashlash
+    if not df_pm.empty:
+        pm_chart = alt.Chart(df_pm).mark_line(color="red").encode(
+            x="date:T",
+            y=alt.Y("prediction:Q",
+                    title="PM2.5 (µg/m³)",
+                    scale=alt.Scale(zero=False)),  # nolni o‘chirib tashlash
+            tooltip=["date:T","prediction:Q"]
+        ).properties(width=800, height=300)
+        st.altair_chart(pm_chart, use_container_width=True)
+    else:
+        st.warning("No PM2.5 prediction data available.")
 
-    st.subheader("Weather Features")
-    weather_cols = ["temperature_2m","humidity","windspeed","surface_pressure","precipitation","cloudcover"]
-    df_melted = forecast_df_prepared.melt(id_vars=["date"], value_vars=weather_cols,
-                                          var_name="feature", value_name="value")
-    weather_chart = alt.Chart(df_melted).mark_line().encode(
+    # Weather features split
+    st.subheader("Weather Features (Temperature, Humidity, Wind, Cloudcover)")
+    weather_cols_main = ["temperature_2m","humidity","windspeed","cloudcover"]
+    df_main = forecast_df_prepared.melt(id_vars=["date"], value_vars=weather_cols_main,
+                                        var_name="feature", value_name="value")
+    chart_main = alt.Chart(df_main).mark_line().encode(
         x="date:T", y="value:Q", color="feature:N",
         tooltip=["date:T","feature:N","value:Q"]
-    ).properties(width=800, height=400)
-    st.altair_chart(weather_chart, use_container_width=True)
+    ).properties(width=800, height=300)
+    st.altair_chart(chart_main, use_container_width=True)
 
-    st.subheader("Warnings & System Flags")
+    st.subheader("Precipitation (Rainfall in mm)")
+    df_prec = forecast_df_prepared.melt(id_vars=["date"], value_vars=["precipitation"],
+                                        var_name="feature", value_name="value")
+    chart_prec = alt.Chart(df_prec).mark_bar(color="blue").encode(
+        x="date:T", y="value:Q",
+        tooltip=["date:T","value:Q"]
+    ).properties(width=800, height=300)
+    st.altair_chart(chart_prec, use_container_width=True)
+
+    st.subheader("Surface Pressure (hPa)")
+    df_press = forecast_df_prepared.melt(id_vars=["date"], value_vars=["surface_pressure"],
+                                         var_name="feature", value_name="value")
+
+    min_val = df_press["value"].min()
+    max_val = df_press["value"].max()
+
+    chart_press = alt.Chart(df_press).mark_line(color="green").encode(
+        x="date:T",
+        y=alt.Y("value:Q",
+                title="Surface Pressure (hPa)",
+                scale=alt.Scale(domain=[min_val - 5, max_val + 5], zero=False)),
+        tooltip=["date:T","value:Q"]
+    ).properties(width=800, height=300)
+
+    st.altair_chart(chart_press, use_container_width=True)
+
+    # Warnings
+    st.subheader("⚠️ Warnings")
     warnings = compute_disaster_warnings(forecast_df_prepared)
     if warnings:
         for w in warnings:
-            if "storm" in w.lower():
+            if "storm" in w.lower() or "heat" in w.lower():
                 st.error("🔴 " + w)
-            elif "wind" in w.lower():
+            elif "wind" in w.lower() or "rain" in w.lower():
                 st.warning("🟠 " + w)
-            elif "rain" in w.lower():
-                st.warning("🟡 " + w)
             else:
                 st.info("🟢 " + w)
     else:
         st.success("🟢 Stable — no immediate disaster warnings.")
 
-# ------------------------
+# -----------------------------
 # Health advice
-# ------------------------
-st.header("3) Health Advice (based on PM2.5)")
+# -----------------------------
+st.header("3) Health Advice (PM2.5)")
 if 'forecast_df_prepared' in locals() and 'prediction' in forecast_df_prepared.columns:
     max_pred = forecast_df_prepared['prediction'].max()
     if max_pred > 150:
@@ -229,6 +270,23 @@ if 'forecast_df_prepared' in locals() and 'prediction' in forecast_df_prepared.c
         st.success("🟢 Safe — Air quality is good.")
 else:
     st.info("No prediction to assess health advice.")
+
+# -----------------------------
+# Glossary
+# -----------------------------
+st.header("4) Glossary (Key Terms)")
+
+glossary_items = {
+    "🌫 PM2.5": "Tiny dust particles that can harm lungs.",
+    "💧 Humidity (%)": "Amount of water vapor in the air.",
+    "📉 Pressure (hPa)": "Air pressure; sudden drop → storm risk.",
+    "🌬 Wind speed (m/s)": "How strong the wind blows.",
+    "🌧 Rainfall (mm)": "Volume of rain; clears pollution but may flood.",
+    "☁️ Cloud cover (%)": "How much of the sky is covered by clouds."
+}
+
+for icon, desc in glossary_items.items():
+    st.markdown(f"<div style='background:#f8f9fa;padding:10px;border-radius:8px;margin-bottom:5px;'><b>{icon}</b> {desc}</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 st.caption("Built for Uzbekistan (Central Asia) — PM2.5 + weather forecasting & storm warnings.")
