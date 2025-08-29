@@ -4,3 +4,7 @@ numpy
 joblib
 altair
 requests
+scikit-learn
+requests-cache
+retry-requests
+openmeteo-requests
